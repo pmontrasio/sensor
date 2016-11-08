@@ -1,3 +1,5 @@
+This is simplified project forked from https://github.com/pmontrasio/decibel
+
 # Decibel
 
 Demoed at http://www.italian-elixir.org/ running on a Raspberry Pi 3.
