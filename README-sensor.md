@@ -1,0 +1,213 @@
+# Startup the sensor
+
+To run the sensor you only need to
+
+```
+mix deps.get
+iex -S mix
+{:ok, channel_hopper, mac_counter} = Sensor.startup("wlan1")
+```
+
+Turn it off with
+
+```
+Sensor.shutdown("wlan1", channel_hopper, mac_counter)
+```
+
+What follows is an in depth guide to the creation of the Elixir application.
+
+
+# Create the Elixir application
+
+```
+mix new sensor --module Sensor
+cd sensor
+vi mix.exs
+```
+
+We have to add the ```wierl``` and ```epcap``` Erlang packages to the dependencies.
+
+```
+  defp deps do
+    [{:wierl, github: "msantos/wierl"}, {:epcap, github: "msantos/epcap"}]
+  end
+```
+
+Then install the dependecies. Open a shell (it will compile ```wierl``` and ```epcap```)
+
+```
+mix deps.get
+iex -S mix
+```
+
+They are Erlang packages so the interoperability is subject to Erlang's  rules. There is a good summary at https://elixirschool.com/lessons/advanced/erlang/#erlang-packages
+
+
+# Working with wierl ed epcap
+
+We need them to put the WiFi interface in monitor mode and capture packets.
+
+References:
+
+* https://github.com/msantos/wierl
+* https://github.com/msantos/epcap
+* http://blog.listincomprehension.com/2011/03/wireless-scanning-with-erlang.html
+
+We need to give some capability to ```beam.smp``` (the multiprocessor one), which is used by Erlang and Elixir on the Raspberry.
+
+```
+sudo setcap cap_net_admin=ep /usr/local/lib/erlang/erts-8.1/bin/beam.smp
+```
+
+and to remove the capability
+
+```
+sudo setcap -r /usr/local/lib/erlang/bin/erl
+sudo setcap -r ~/elixir/bin/iex
+```
+
+These are some exercises in the Elixir interactive shell to get familiar with the key concepts of the setup of the WiFi card and packet capture.
+
+Connect to the Raspberry with two shells. Be sure to use the IP address of the internal WiFi adapter or of the Ethernet card. Don't connect to the WiFi card that you're going to put in monitor mode: you'll get disconnected.
+
+```
+ssh pi@<address>
+sudo apt-get install iw # you'll need this
+cd /path/to/the/sensor/app
+iex -S mix
+interface = "wlan1"
+```
+
+Put the interface into monitor mode.
+
+```
+:ok = :wierl_config.down(interface)
+{:ok, channel_def} = :wierl_config.param(interface, {:mode, :wierl.mode(:monitor)})
+{:channel, channel_number} = :wierl.decode({:channel, channel_def})
+:ok = :wierl_config.up(interface)
+```
+
+Use the other shell to verify that it worked.
+
+```
+$ iwconfig wlan1
+wlan1     IEEE 802.11bgn  Mode:Monitor  Frequency:2.447 GHz  Tx-Power=20 dBm
+          Retry short limit:7   RTS thr:off   Fragment thr:off
+          Power Management:off
+$ iw dev lan info
+Interface wlan1
+	ifindex 4
+	wdev 0x100000001
+	addr <the card mac address>
+	type monitor
+	wiphy 1
+	channel 6 (2447 MHz), width: 20 MHz (no HT), center1: 2447 MHz
+...
+```
+
+Put the interface back to managed mode.
+
+```
+:ok = :wierl_config.down(interface)
+{:ok, channel_def} = :wierl_config.param(interface, {:mode, :wierl.mode(:infra)})
+:ok = :wierl_config.up(interface)
+```
+
+and check that it's back to normal. It's going to get an IP address again after some time.
+
+```
+$ iwconfig wlan1
+wlan1     IEEE 802.11bgn  ESSID:"<your wifi network>"
+          Mode:Managed  Frequency:2.447 GHz  Access Point: <your AP mac address>
+...
+```
+
+We could get packets with ```wierl``` like this
+
+```
+{:ok, socket} = :wierl_monitor.open(interface)
+{:ok, frame} = :wierl_monitor.read(socket)
+:wierl_monitor.close(socket)
+```
+
+but we'll use ```epcap``` for that.
+
+To get packets with ```epcap``` put ```wlan1``` in monitor mode.
+If you're connecting over the Ethernet interface, take down ```wlan0```.
+Finally ```receive``` a packet and display the source and destination mac addresses. We'll need both of them.
+
+
+```
+:ok = :wierl_config.down(interface)
+{:ok, channel_def} = :wierl_config.param(interface, {:mode, :wierl.mode(:monitor)})
+{:channel, channel_number} = :wierl.decode({:channel, channel_def})
+:ok = :wierl_config.up(interface)
+
+ok = :wierl_config.down("wlan0")
+
+{:ok, pid} = :epcap.start([{:interface, interface, :monitor, true}])
+
+receive do
+    {:packet, data_link_type, time, length, packet} ->
+       case :pkt.decapsulate({:pkt.dlt(data_link_type), packet}) do
+           [{:ether, source_mac_address, destination_mac_address, _, _}, _, _, _] ->
+               IO.puts Base.encode16(source_mac_address, case: :lower)
+               IO.puts Base.encode16(destination_mac_address, case: :lower)
+       end
+    _ -> :epcap.stop(pid)
+end
+
+:epcap.stop(pid)
+
+ok = :wierl_config.up("wlan0")
+
+:ok = :wierl_config.down(interface)
+{:ok, channel_def} = :wierl_config.param(interface, {:mode, :wierl.mode(:infra)})
+:ok = :wierl_config.up(interface)
+
+```
+
+To change channel:
+
+```
+{:ok, channel_def} = :wierl_config.param(interface, {:freq, 6})
+{:ok, channel_def} = :wierl_config.param(interface, {:freq, 7})
+...
+```
+
+Check that it worked with
+
+```
+iw dev wlan1 info
+```
+
+
+# The sensor application
+
+General architecture: put the interface in monitor mode and start all the servers.
+
+* a KV server to store the unique mac addresses
+* a server to perform channel hopping with wierl
+* a server to read packets
+* a server to send the counter to AWS and reset the KV server
+
+Optional:
+
+* get a quit command from the bot, put the interface back to managed mode and quit the application.
+* get a shutdown command from the bot: shutdown the Raspberry.
+
+How to get commands from the bot?
+
+* polling is bad
+* https://github.com/gausby/gen_mqtt
+* can we connect to the Dynamo db and get triggers?
+
+## Functions
+
+```
+iex -S mix
+interface = "wlan1"
+{:ok, channel_number} = Sensor.enter_monitor_mode(interface)
+```
+
+```channel_number``` doesn't always agree with what is reported by ```iw dev wlan1 info```.
