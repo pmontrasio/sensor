@@ -1,49 +1,55 @@
 defmodule MacAddress do
-  def start_link(client) do
-    Task.start_link(fn -> init(client) end)
+  def start_link(interface, period) do
+    Task.start_link(fn -> count(interface, period) end)
   end
 
-  def init(client) do
-    cmd = System.get_env("TSHARK_CMD")
-    port = Port.open({:spawn, cmd}, [:binary, {:line, 1000}])
-    detect(port, %{}, :none, client)
+  def count(interface, period) do
+    {:ok, pid} = :epcap.start([{:interface, interface, :monitor, true}])
+    packet_monitor_loop(pid, %{}, :os.system_time(:millisecond) + period, period)
   end
 
-
-  defp detect(port, addresses, prev_second, client) do
+  defp packet_monitor_loop(pid, addresses, send_at, period) do
     receive do
+      {:packet, data_link_type, _, _, packet} ->
 
-      {^port, {:data, {:eol, line}}} ->
-        case String.rstrip(line) |> String.split("\t") do
-          [_, timestamp, mac, dbm] ->
-            second = String.split(timestamp, ".") |> List.first
-            {float_dbm, _} = Float.parse(dbm)
-            if second == prev_second do
-              addresses = Map.update(addresses, mac, [float_dbm], &(&1 ++ [float_dbm]))
-            else
-              unless prev_second == :none, do: send_averages(client, addresses)
-              addresses = %{mac => [float_dbm]}
-            end
-            detect(port, addresses, second, client)
+        addresses = case :pkt.decapsulate({:pkt.dlt(data_link_type), packet}) do
 
-          _ ->
-            detect(port, addresses, prev_second, client)
+          [{:ether, source_mac_address, destination_mac_address, _, _}, _, _, _] ->
+                update(addresses, source_mac_address, destination_mac_address)
+
+          [{:ether, source_mac_address, destination_mac_address, _, _}, _, _] ->
+                update(addresses, source_mac_address, destination_mac_address)
+
+          _ -> addresses
+
+        end
+        now = :os.system_time(:millisecond)
+        if now >= send_at do
+          send_to_db(addresses)
+          packet_monitor_loop(pid, %{}, now + period, period)
+        else
+          packet_monitor_loop(pid, addresses, send_at, period)
         end
 
-      _ -> Port.close(port)
-
+      _ -> :epcap.stop(pid)
     end
+
   end
 
-  defp send_averages(client, addresses)  do
+  defp update(addresses, source_mac_address, destination_mac_address) do
+    source = Base.encode16(source_mac_address, case: :lower)
+    destination = Base.encode16(destination_mac_address, case: :lower)
+    addresses
+    |> Map.update(source, 1, &(&1 + 1))
+    |> Map.update(destination, 1, &(&1 + 1))
+  end
 
-    send client, Enum.map(addresses, fn({mac_address, dbms}) ->
-      sum = Enum.reduce(dbms, fn(float_dbm, sum) -> float_dbm + sum end)
-      len = length(dbms)
-      average_dbm = sum / len
-      {mac_address, average_dbm, len}
-    end)
-
+  def send_to_db(addresses) do
+    IO.puts("Send addresses: #{Enum.join(Map.keys(addresses, ", "))}")
   end
 
 end
+
+# Sample packets
+# [{:ether, <<255, 255, 255, 255, 255, 255>>, <<156, 92, 249, 233, 22, 81>>, 2054, 0}, {:arp, 1, 2048, 6, 4, 1, <<156, 92, 249, 233, 22, 81>>, {192, 168, 1, 102}, <<0, 0, 0, 0, 0, 0>>, {192, 168, 1, 100}}, <<193, 172, 41, 253, 237, 24, 173, 65, 239, 155, 4, 178, 132, 0, 0, 0, 64, 107>>]
+

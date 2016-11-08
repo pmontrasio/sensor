@@ -1,4 +1,4 @@
-defmodule Beacon.Mixfile do
+defmodule Sensor.Mixfile do
   use Mix.Project
 
   def project do
