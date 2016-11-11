@@ -35,6 +35,6 @@ defmodule ChannelHopper.Mixfile do
   #
   # Type "mix help deps" for more examples and options
   defp deps do
-    []
+    [{:wierl, github: "msantos/wierl"}, {:epcap, github: "msantos/epcap"}]
   end
 end
